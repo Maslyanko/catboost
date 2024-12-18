@@ -205,4 +205,49 @@ namespace NCB {
         TVector<TEmbeddingDataSetPtr> TestArrays;
         const TGuid Guid;
     };
+    template <>
+    void TEmbeddingBaseEstimator<TKNNCalcer, TKNNCalcerVisitor>::ComputeOnlineFeatures (
+        TConstArrayRef<ui32> learnPermutation,
+        TCalculatedFeatureVisitor learnVisitor,
+        TConstArrayRef<TCalculatedFeatureVisitor> testVisitors,
+        NPar::ILocalExecutor* localExecutor) const {
+        {
+            ui64 numThreads = 4;
+            const auto& learnDataset = GetLearnDataset();
+            const ui32 featuresCount = 1;
+            const auto& target = GetTarget();
+            const ui64 samplesCount = learnDataset.SamplesCount();
+            TVector<float> learnFeatures(featuresCount * samplesCount);
+
+            NPar::ILocalExecutor::TExecRangeParams params{0, numThreads};
+            localExecutor->ExecRange([&](int id) {
+                TKNNCalcer calcer = CreateFeatureCalcer();
+                TKNNCalcerVisitor visitor = CreateCalcerVisitor();
+    
+                int linesPerThread = samplesCount / numThreads;
+                int begin = id * linesPerThread;
+                int end = (id + 1) * linesPerThread;
+                if (id == numThreads - 1) {
+                    end = samplesCount;
+                }
+    
+                for (int i = begin; i < end; ++i) {
+                    auto line = learnPermutation[i];
+                    const TEmbeddingsArray& vector = learnDataset.GetVector(line);
+                    Compute(calcer, vector, line, samplesCount, learnFeatures);
+                    visitor.Update(target[line], vector, &calcer);
+                }
+            }, params, NPar::TLocalExecutor::WAIT_COMPLETE);
+
+            for (ui32 f = 0; f < featuresCount; ++f) {
+                learnVisitor(
+                    f,
+                    TConstArrayRef<float>(
+                        learnFeatures.data() + f * samplesCount,
+                        learnFeatures.data() + (f + 1) * samplesCount
+                    )
+                );
+            }
+        }
+    }
 };
